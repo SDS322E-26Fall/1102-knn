@@ -1,171 +1,143 @@
 library(tidyverse)
-library(patchwork)
+library(tidymodels)
 library(kknn)
-library(caret)
+
+# get the penguins dataset
 penguins_clean <- as_tibble(datasets::penguins) |> na.omit()
-penguins_clean
+head(penguins_clean, 3)
+
+##################################################################
+# Example 1: a first KNN workflow
+# Goal: predict penguin `sex` from `bill_len` and `bill_dep` with KNN
+
+# Step 1: specify the model, with k = 5 neighbors
+knn_mod <- nearest_neighbor(mode = "classification", neighbors = 5) |>
+  set_engine("kknn")
+
+# Step 2: specify the pre-processing recipe
+# KNN is based on distances, so scale the predictors
+knn_rec <- recipe(sex ~ bill_len + bill_dep, data = penguins_clean) |>
+  step_normalize(all_predictors())
+
+# Step 3: build a workflow
+knn_wf <- workflow() |> add_recipe(knn_rec) |> add_model(knn_mod)
+
+# Step 4: fit the model
+knn_fit <- knn_wf |> fit(data = penguins_clean)
+
+# Step 5: predict
+knn_pred <- augment(knn_fit, penguins_clean)
+knn_pred |> select(sex, .pred_class, .pred_female, .pred_male) |> head(5)
+
+# Step 6: calculate classification metrics
+conf_mat(knn_pred, truth = sex, estimate = .pred_class)
+accuracy(knn_pred, truth = sex, estimate = .pred_class)
 
 
-######################################################################
-# script 1: Basic KNN with caret::knn3()
-######################################################################
-# Step 1: scale the predictors
-penguins_std <- penguins_clean |>
-  select(bill_len, bill_dep) |>
-  ...|>
-  ...
+##################################################################
+# k is a hyperparameter: each value of k gives a different model
+# predict on a grid of bill length and depth to draw the decision boundary
+grid_df <- crossing(
+  bill_len = seq(min(penguins_clean$bill_len), max(penguins_clean$bill_len), length.out = 120),
+  bill_dep = seq(min(penguins_clean$bill_dep), max(penguins_clean$bill_dep), length.out = 120)
+)
 
-# Step 2: fit a knn model with caret::knn3()
-knn_res <- knn3(sex ~ bill_len + bill_dep,  data = penguins_std)
+boundary_k <- function(k) {
+  fit_k <- knn_wf |>
+    update_model(nearest_neighbor(mode = "classification", neighbors = k) |> set_engine("kknn")) |>
+    fit(data = penguins_clean)
+  augment(fit_k, grid_df) |> mutate(k = paste("k =", k))
+}
 
+boundaries <- map_dfr(c(1, 5, 25), boundary_k) |>
+  mutate(k = fct_inorder(k))
 
-# Step 3: predict on teh standardized full dataset
-knn_pred <- predict(knn_res, newdata = penguins_std)
-
-# Step 4: calculate classification metrics
-pred_knn_df <- as_tibble(knn_pred) |>
-  mutate(class = ifelse(male > female, "male", "female"))
-table(pred_knn_df$class, penguins_std$sex)
-
-
-######################################################################
-# script 2: training/ testing split with logistic regression
-######################################################################
-# step 1: conduct a training testing split of 1/3 and 2/3 for testing and training
-m <- nrow(penguins_clean)
-set.seed(123)
-val <- ...
-penguins_training <- ...
-penguins_testing <- ...
+boundaries |>
+  ggplot(aes(x = bill_len, y = bill_dep)) +
+  geom_raster(aes(fill = .pred_class), alpha = 0.35) +
+  geom_point(data = penguins_clean, aes(color = sex), size = 1) +
+  facet_wrap(vars(k)) +
+  scale_fill_brewer(palette = "Dark2", name = "Predicted") +
+  scale_color_brewer(palette = "Dark2", name = "Observed") +
+  labs(x = "Bill length (mm)", y = "Bill depth (mm)") +
+  theme_bw() +
+  theme(aspect.ratio = 1, legend.position = "bottom")
 
 
-# step 2: fit a logistic regression model
-mod_glm <- glm(sex ~ bill_len + bill_dep, family = binomial, data = ...)
+##################################################################
+# Which k is best? Not on the training data
+# fit k = 1, ..., 20 and compute the accuracy on the same data we fit on
+train_acc <- map_dfr(1:20, \(k) {
+  knn_wf |>
+    update_model(nearest_neighbor(mode = "classification", neighbors = k) |> set_engine("kknn")) |>
+    fit(data = penguins_clean) |>
+    augment(penguins_clean) |>
+    accuracy(truth = sex, estimate = .pred_class) |>
+    mutate(k = k)
+})
 
-
-# step 3: get the prediction for the testing set
-lr_pred_vec <- predict(mod_glm, newdata = ..., type = "...")
-
-# step 4: calculate classification metrics
-lr_pred_res <- tibble(pred = lr_pred_vec, pred_class = ifelse(pred > 0.5, 1, 0))
-table(..., ...)
-
-
-######################################################################
-# Your time: training/ testing split with KNN
-######################################################################
-# step 1
-
-# step 2
-
-# step 3
-
-# step 4
-
-# step 5
-
-
-
-
-######################################################################
-# Your time: training/ testing split with KNN for regression
-######################################################################
-penguins_clean2 <- as_tibble(datasets::penguins) |> na.omit() |>
-  mutate(sex2 = ifelse(sex == "male", 1, 0))
-
-
-
-
-
-
-######################################################################
-# script 3: Hyperparameter tuning with different seed
-# change the seed value to see how the training-testing split
-######################################################################
-# Step 1: conduct the same training testing split
-penguins_std <- penguins_clean |>
-  select(bill_len, bill_dep) |>
-  scale() |>
-  bind_cols(sex = penguins_clean2$sex)
-m <- nrow(penguins_std)
-set.seed(12345) # CHANGE ME
-val <- sample(1:m, size = round(m/3), replace = FALSE)
-penguins_training2 <- penguins_std[-val,]
-penguins_testing2 <- penguins_std[val,]
-
-
-# Step 2: fit the KNN model with different k_vec
-# you can think of this as for each k, we make a prediction of the 111 testing points
-# this gives us 20 * 111 = 2220 predictions
-k_vec <- 1:20
-k_res <- map_dfr(k_vec, function(k){
-  knn_res2 <- kknn(sex ~ bill_len + bill_dep, k = k,
-                   train = penguins_training2, test = penguins_testing2)
-  res <- tibble(pred_class = predict(knn_res2))
-  tibble(pred = res$pred_class, sex = penguins_testing2$sex)
-}, .id = "k")
-
-# Step 3: compute the prediction accuracy for each k and plot it
-acc_count_df <- k_res |>
-  group_split(k) |>
-  map_dfr(~count(.x, pred, sex), .id = "k") |>
-  filter(pred == sex) |>
-  mutate(k = as.integer(k)) |>
-  group_by(k) |>
-  summarize(accuracy = sum(n) / 111)
-
-acc_count_df |>
-  ggplot(aes(x = k, y = accuracy)) +
+train_acc |>
+  ggplot(aes(x = k, y = .estimate)) +
   geom_line() +
   geom_point() +
   scale_x_continuous(breaks = 1:20) +
-  ggtitle("With seed = 1105, best k = 4 or 5 or 18")
+  labs(y = "Accuracy on training data")
 
 
-######################################################################
-# script 4: Cross validation for KNN
-######################################################################
-library(kknn)
-library(caret)
+##################################################################
+# Example 2: KNN workflow with tuning and cross-validation
+
+# Step 0: training-testing split
 set.seed(123)
-penguins_clean <- as_tibble(datasets::penguins) |> na.omit()
+penguins_split <- initial_split(penguins_clean, prop = 0.75)
+penguins_split
+penguins_train <- training(penguins_split)
+penguins_test  <- testing(penguins_split)
+dim(penguins_train)
+dim(penguins_test)
 
-penguins_std <- penguins_clean |>
-  select(bill_len, bill_dep) |>
-  scale() |>
-  bind_cols(sex = penguins_clean$sex)
+# Step 1: specify the model, with the number of neighbors left to tune
+knn_tune_mod <- nearest_neighbor(mode = "classification", neighbors = tune()) |> set_engine("kknn")
 
+# Step 2: specify the pre-processing recipe
+knn_rec <- recipe(sex ~ bill_len + bill_dep, data = penguins_train) |> step_normalize(all_predictors())
 
-folds <- createFolds(penguins_std$sex, k = 10)
+# Step 3: build a workflow
+knn_tune_wf <- workflow() |> add_recipe(knn_rec) |> add_model(knn_tune_mod)
 
-k_values <- 1:20
-acc_k <- numeric(length(k_values))
+# Step 4a: create the cross-validation folds from the training data
+penguins_folds <- vfold_cv(penguins_train, v = 10)
+penguins_folds
 
-for (j in seq_along(k_values)) {
-  acc_fold <- c()
+# Step 4b: set up the hyperparameter grid: the values of k to try
+knn_grid <- grid_regular(neighbors(range = c(1, 20)), levels = 20)
+knn_grid
 
-  for (i in 1:10) {
-    test_idx <- folds[[i]]
-    train_data <- penguins_std[-test_idx, ]
-    test_data  <- penguins_std[test_idx, ]
+# Step 4c: fit the model for every k on every fold
+knn_tune_res <- tune_grid(knn_tune_wf, resamples = penguins_folds, grid = knn_grid)
+knn_tune_res
+knn_tune_res |> tidyr::unnest(.metrics)
 
-    mod <- kknn(sex ~ bill_len + bill_dep,
-                train = train_data,
-                test = test_data,
-                k = k_values[j])
+# Step 4d: average the metrics over the 10 folds
+collect_metrics(knn_tune_res) |> filter(.metric == "accuracy")
+autoplot(knn_tune_res, metric = "accuracy")
 
-    pred <- fitted(mod)
-    acc_fold[i] <- mean(pred == test_data$sex)
-  }
+# Step 4e: find the best k
+show_best(knn_tune_res, metric = "accuracy", n = 5)
+best_k <- select_best(knn_tune_res, metric = "accuracy")
+best_k
 
-  acc_k[j] <- mean(acc_fold)
-}
+# Step 4f: plug in the best k and refit on the whole training data
+final_wf <- finalize_workflow(knn_tune_wf, best_k)
+final_wf
+final_fit <- fit(final_wf, data = penguins_train)
 
-# Show best k
-best_k <- k_values[which.max(acc_k)]
-tibble(x = 1:20, y = acc_k) |>
-  ggplot(aes(x = x, y = y)) +
-  geom_point() +
-  geom_line() +
-  scale_x_continuous(breaks = 1:20)
+# Step 5/6: predict and calculate classification metrics on the testing data, once
+res_final <- augment(final_fit, penguins_test)
+metrics(res_final, truth = sex, estimate = .pred_class)
 
+# ROC curve on the testing data
+# male is the positive class (1): yardstick uses the first level (female) by default,
+# so set event_level = "second"
+roc_curve(res_final, truth = sex, .pred_male, event_level = "second") |> autoplot()
+roc_auc(res_final, truth = sex, .pred_male, event_level = "second")
